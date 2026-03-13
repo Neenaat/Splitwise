@@ -145,9 +145,28 @@ h2, h3 { color: #e2e8f0 !important; border-bottom: 1px solid #2d3748; padding-bo
 """)
 
 # ─── AUTHENTICATION ──────────────────────────────────────────────────────────
-# Load credentials from config.yaml
-with open("config.yaml", encoding="utf-8") as f:
-    auth_config = yaml.load(f, Loader=SafeLoader)
+def _secrets_to_dict(obj):
+    """Recursively convert Streamlit secrets AttrDict to a plain Python dict."""
+    if hasattr(obj, "items"):
+        return {k: _secrets_to_dict(v) for k, v in obj.items()}
+    return obj
+
+def load_auth_config():
+    """
+    Load auth config from Streamlit secrets (Streamlit Cloud deployment)
+    or fall back to config.yaml (local development).
+    """
+    try:
+        return {
+            "credentials":   _secrets_to_dict(st.secrets["credentials"]),
+            "cookie":        _secrets_to_dict(st.secrets["cookie"]),
+            "preauthorized": {"emails": []},
+        }
+    except (KeyError, Exception):
+        with open("config.yaml", encoding="utf-8") as f:
+            return yaml.load(f, Loader=SafeLoader)
+
+auth_config = load_auth_config()
 
 authenticator = stauth.Authenticate(
     auth_config["credentials"],

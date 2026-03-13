@@ -1,0 +1,17 @@
+# Virtual environment — never upload to GitHub (reinstall with pip install -r requirements.txt)
+venv/
+
+# Local SQLite database — don't upload to GitHub (it's on your computer only)
+splitwise.db
+
+# Secrets — NEVER upload to GitHub
+.streamlit/secrets.toml
+config.yaml
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env

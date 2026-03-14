@@ -436,24 +436,36 @@ else:
         else:
             st.info("No expense data for pie chart yet.")
 
-    # Savings pie — cool blue/teal/green palette
+    # Savings pie — net per pot (Saving minus Withdrawals), matching KPI cards
     with ch2:
-        sav_df = df[df["type"] == "Saving"]
-        if not sav_df.empty:
-            fig_sav_pie = px.pie(sav_df, names="category", values="amount",
-                                 title="Savings Breakdown", hole=0.35,
-                                 color_discrete_sequence=["#3b82f6","#8b5cf6","#10b981"])
+        pot_rows = [{"category": cat, "amount": _pot(cat)} for cat in SAVING_CATEGORIES]
+        sav_net_df = pd.DataFrame(pot_rows)
+        sav_net_df = sav_net_df[sav_net_df["amount"] > 0]
+        if not sav_net_df.empty:
+            fig_sav_pie = px.pie(sav_net_df, names="category", values="amount",
+                                 title="Net Savings by Pot (after Withdrawals)", hole=0.35,
+                                 color_discrete_sequence=["#3b82f6","#8b5cf6","#10b981","#06b6d4","#0d9488"])
             fig_sav_pie.update_layout(**CHART_LAYOUT)
             st.plotly_chart(fig_sav_pie, use_container_width=True)
         else:
             st.info("No savings data yet.")
 
-    # Bar chart: Income vs Expense vs Credit vs Saving per person
-    summary = df.groupby(["person", "type"])["amount"].sum().reset_index()
+    # Bar chart: per person — Net Saving replaces raw Saving/Withdrawal so bar matches KPI
+    raw_sum     = df.groupby(["person", "type"])["amount"].sum().reset_index()
+    non_sav_sum = raw_sum[~raw_sum["type"].isin(["Saving", "Withdrawal"])].copy()
+    sav_by_p    = raw_sum[raw_sum["type"] == "Saving"].set_index("person")["amount"]
+    wdr_by_p    = raw_sum[raw_sum["type"] == "Withdrawal"].set_index("person")["amount"]
+    net_sav_rows = [
+        {"person": p, "type": "Net Saving",
+         "amount": max(sav_by_p.get(p, 0) - wdr_by_p.get(p, 0), 0)}
+        for p in df["person"].unique()
+    ]
+    summary = pd.concat([non_sav_sum, pd.DataFrame(net_sav_rows)], ignore_index=True)
+    bar_color_map = {**COLOR_MAP, "Net Saving": "#3b82f6"}
     fig_bar = px.bar(summary, x="person", y="amount", color="type", barmode="group",
-                     title="Income vs Expense vs Credit vs Saving by Person",
+                     title="Income vs Expense vs Credit vs Net Saving by Person",
                      labels={"amount": "Amount (KD)", "person": "Person"},
-                     color_discrete_map=COLOR_MAP)
+                     color_discrete_map=bar_color_map)
     fig_bar.update_layout(**CHART_LAYOUT)
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -475,12 +487,25 @@ else:
     df["month_sort"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m")
     df["month"]      = pd.to_datetime(df["date"]).dt.strftime("%b %Y")
 
-    monthly = df.groupby(["month_sort", "month", "type"])["amount"].sum().reset_index()
+    # Monthly chart — Net Saving per month (Saving minus Withdrawal), matching KPI logic
+    monthly_raw     = df.groupby(["month_sort", "month", "type"])["amount"].sum().reset_index()
+    monthly_non_sav = monthly_raw[~monthly_raw["type"].isin(["Saving", "Withdrawal"])].copy()
+    sav_m = monthly_raw[monthly_raw["type"] == "Saving"].set_index(["month_sort", "month"])["amount"]
+    wdr_m = monthly_raw[monthly_raw["type"] == "Withdrawal"].set_index(["month_sort", "month"])["amount"]
+    all_months = monthly_raw[["month_sort", "month"]].drop_duplicates()
+    net_sav_m = [
+        {"month_sort": r["month_sort"], "month": r["month"], "type": "Net Saving",
+         "amount": max(sav_m.get((r["month_sort"], r["month"]), 0)
+                       - wdr_m.get((r["month_sort"], r["month"]), 0), 0)}
+        for _, r in all_months.iterrows()
+    ]
+    monthly = pd.concat([monthly_non_sav, pd.DataFrame(net_sav_m)], ignore_index=True)
     monthly = monthly.sort_values("month_sort")
+    monthly_color_map = {**COLOR_MAP, "Net Saving": "#3b82f6"}
     fig_monthly = px.bar(monthly, x="month", y="amount", color="type", barmode="group",
-                         title="Monthly Income vs Expense vs Saving vs Credit",
+                         title="Monthly Income vs Expense vs Net Saving vs Credit",
                          labels={"amount": "Amount (KD)", "month": "Month"},
-                         color_discrete_map=COLOR_MAP)
+                         color_discrete_map=monthly_color_map)
     fig_monthly.update_layout(**CHART_LAYOUT)
     st.plotly_chart(fig_monthly, use_container_width=True)
 
@@ -492,6 +517,9 @@ else:
     for col in ["Income", "Expense", "Credit", "Saving", "Withdrawal", "Debit"]:
         if col not in monthly_pivot.columns:
             monthly_pivot[col] = 0.0
+    monthly_pivot["Net Saving (Saving−Withdrawal)"] = (
+        monthly_pivot["Saving"] - monthly_pivot["Withdrawal"]
+    ).clip(lower=0)
     monthly_pivot["Net (Income−Expense−Credit)"] = (
         monthly_pivot["Income"] - monthly_pivot["Expense"] - monthly_pivot["Credit"]
     )

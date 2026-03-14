@@ -13,7 +13,7 @@ import pandas as pd
 import requests
 from yaml.loader import SafeLoader
 from datetime import date
-from database import create_table, add_transaction, get_all_transactions, delete_transaction
+from database import create_table, add_transaction, get_all_transactions, delete_transaction, delete_multiple_transactions
 
 # ─── APP SETUP ───────────────────────────────────────────────────────────────
 create_table()
@@ -56,11 +56,22 @@ h2, h3 { color: #e2e8f0 !important; border-bottom: 1px solid #2d3748; padding-bo
 }
 .stRadio > div { gap: 0.5rem; }
 
-/* ── Login form label colors ── */
+/* ── All label text white ── */
 .stTextInput label p,
 .stTextInput label,
 .stForm label,
-.stForm label p {
+.stForm label p,
+.stNumberInput label,
+.stNumberInput label p,
+.stSelectbox label,
+.stSelectbox label p,
+.stRadio label,
+.stRadio label p,
+.stDateInput label,
+.stDateInput label p,
+.stCheckbox label,
+.stCheckbox label p,
+.stCheckbox span {
     color: #e2e8f0 !important;
     font-weight: 600 !important;
 }
@@ -196,12 +207,17 @@ authenticator.logout("Logout", location="sidebar")
 st.sidebar.markdown("---")
 
 # ─── CATEGORIES ──────────────────────────────────────────────────────────────
-EXPENSE_CATEGORIES  = ["Bakala", "Rent / EMI", "Send to India", "Transport",
-                        "Medical", "Shopping", "Entertainment", "Investments", "Other"]
+EXPENSE_CATEGORIES  = ["Grocery", "Rent", "Send to India", "Transport",
+                        "Medical", "Shopping", "Entertainment",
+                        "Loan Repayment", "Credit Card Bill", "Other"]
 INCOME_CATEGORIES   = ["Salary", "Freelance", "Business", "Other"]
 CREDIT_CATEGORIES   = ["Lent to Friend", "Lent to Family", "Advance Given", "Other"]
 # Saving = money set aside; stays with you but in a dedicated pot
-SAVING_CATEGORIES   = ["Emergency Fund", "Travel Fund", "Other Savings"]
+SAVING_CATEGORIES   = ["Emergency Fund", "Travel Fund", "Investments", "Chitty", "Other Savings"]
+# Debit = money we borrowed that we need to repay
+DEBIT_CATEGORIES    = ["Borrowed from Friend", "Loan Taken", "Credit Card Debt", "Other"]
+# Withdrawal = taking money OUT of a savings pot (uses same categories so we know which pot was reduced)
+WITHDRAWAL_CATEGORIES = SAVING_CATEGORIES
 
 # ─── LIVE EXCHANGE RATE ──────────────────────────────────────────────────────
 # open.er-api.com is free, no API key needed, and supports KWD unlike frankfurter.app
@@ -240,7 +256,7 @@ st.html("""
 st.sidebar.markdown("### ✦ ADD NEW ENTRY")
 
 person     = st.sidebar.selectbox("Who are you?", ["Neena", "Shobin"])
-entry_type = st.sidebar.radio("Type", ["Income", "Expense", "Credit", "Saving"])
+entry_type = st.sidebar.radio("Type", ["Income", "Expense", "Credit", "Saving", "Withdrawal", "Debit"])
 
 if entry_type == "Income":
     category = st.sidebar.selectbox("Category", INCOME_CATEGORIES)
@@ -248,11 +264,30 @@ elif entry_type == "Credit":
     category = st.sidebar.selectbox("Category", CREDIT_CATEGORIES)
 elif entry_type == "Saving":
     category = st.sidebar.selectbox("Category", SAVING_CATEGORIES)
-    st.sidebar.caption("Saving = money you set aside (emergency cash, travel fund). It stays with you.")
+    st.sidebar.caption("Saving = money you set aside (emergency cash, travel fund, investments). It stays with you.")
+elif entry_type == "Withdrawal":
+    category = st.sidebar.selectbox("Category", WITHDRAWAL_CATEGORIES)
+    st.sidebar.caption("Withdrawal = taking money OUT of a savings pot. Reduces that pot's balance.")
+elif entry_type == "Debit":
+    category = st.sidebar.selectbox("Category", DEBIT_CATEGORIES)
 else:
     category = st.sidebar.selectbox("Category", EXPENSE_CATEGORIES)
 
-amount     = st.sidebar.number_input("Amount (KD)", min_value=0.0, step=1.0, format="%.3f")
+# ── Amount input — KWD or INR for all types ──────────────────────────────────
+entry_currency = st.sidebar.radio("Currency", ["KWD", "INR"])
+if entry_currency == "INR":
+    inr_input = st.sidebar.number_input("Amount (INR ₹)", min_value=0.0, step=100.0, format="%.2f")
+    _rates = get_exchange_rates()
+    if _rates and inr_input > 0:
+        amount = inr_input / _rates["INR"]
+        st.sidebar.info(f"Converted: KD {amount:.3f}")
+    else:
+        amount = 0.0
+        if not _rates:
+            st.sidebar.warning("Live rate unavailable. Switch to KWD.")
+else:
+    amount = st.sidebar.number_input("Amount (KD)", min_value=0.0, step=1.0, format="%.3f")
+
 note       = st.sidebar.text_input("Note (optional)", placeholder="e.g. Monthly groceries")
 entry_date = st.sidebar.date_input("Date", value=date.today())
 
@@ -303,10 +338,12 @@ CHART_LAYOUT = dict(
 )
 
 COLOR_MAP = {
-    "Income":  "#10b981",  # Green
-    "Expense": "#ef4444",  # Red
-    "Credit":  "#f59e0b",  # Orange
-    "Saving":  "#3b82f6",  # Blue
+    "Income":     "#10b981",  # Green
+    "Expense":    "#ef4444",  # Red
+    "Credit":     "#f59e0b",  # Orange
+    "Saving":     "#3b82f6",  # Blue
+    "Withdrawal": "#f43f5e",  # Rose (money leaving savings)
+    "Debit":      "#dc2626",  # Dark Red
 }
 
 # ─── MAIN DASHBOARD ──────────────────────────────────────────────────────────
@@ -314,14 +351,31 @@ if df.empty:
     st.info("No entries yet. Add your first entry from the left sidebar!")
 else:
     # ── Totals ──
-    total_income    = df[df["type"] == "Income"]["amount"].sum()
-    total_expense   = df[df["type"] == "Expense"]["amount"].sum()
-    total_credit    = df[df["type"] == "Credit"]["amount"].sum()
-    total_saving    = df[df["type"] == "Saving"]["amount"].sum()
-    emergency_fund  = df[(df["type"] == "Saving") & (df["category"] == "Emergency Fund")]["amount"].sum()
-    travel_fund     = df[(df["type"] == "Saving") & (df["category"] == "Travel Fund")]["amount"].sum()
-    # Available balance = income minus what was spent, given out, or set aside
-    available       = total_income - total_expense - total_credit - total_saving
+    total_income       = df[df["type"] == "Income"]["amount"].sum()
+    total_expense      = df[df["type"] == "Expense"]["amount"].sum()
+    total_credit       = df[df["type"] == "Credit"]["amount"].sum()
+    total_saving       = df[df["type"] == "Saving"]["amount"].sum()
+    total_withdrawal   = df[df["type"] == "Withdrawal"]["amount"].sum()
+
+    def _pot(category_name):
+        """Net balance of a savings pot = saved into it - withdrawn from it."""
+        saved    = df[(df["type"] == "Saving")     & (df["category"] == category_name)]["amount"].sum()
+        taken    = df[(df["type"] == "Withdrawal") & (df["category"] == category_name)]["amount"].sum()
+        return max(saved - taken, 0)
+
+    emergency_fund     = _pot("Emergency Fund")
+    travel_fund        = _pot("Travel Fund")
+    investment_total   = _pot("Investments")
+    # Total net savings = all savings pots combined minus all withdrawals
+    net_savings        = max(total_saving - total_withdrawal, 0)
+
+    # Debit = money borrowed; reduced by Loan Repayment and Credit Card Bill expense entries
+    total_debit        = df[df["type"] == "Debit"]["amount"].sum()
+    loan_repaid        = df[(df["type"] == "Expense") & (df["category"] == "Loan Repayment")]["amount"].sum()
+    cc_repaid          = df[(df["type"] == "Expense") & (df["category"] == "Credit Card Bill")]["amount"].sum()
+    outstanding_debt   = total_debit - loan_repaid - cc_repaid
+    # Available balance = income minus what was spent and given out (savings stay with you)
+    available          = total_income - total_expense - total_credit
 
     # ── Fetch live rates once — used across all KPI cards ──
     rates   = get_exchange_rates()
@@ -346,13 +400,23 @@ else:
 
     st.markdown("<div style='margin-top:0.8rem'></div>", unsafe_allow_html=True)
 
-    # ── Row 2 KPIs: Emergency | Travel | Available Balance ──
-    r2c1, r2c2, r2c3 = st.columns(3)
-    bal_color = "#10b981" if available >= 0 else "#ef4444"
-    bal_note  = "Freely available" if available >= 0 else "Overspent"
-    with r2c1: st.html(kpi_card("Emergency Fund",    f"KD {emergency_fund:,.3f}", "#3b82f6", "In-hand savings",  inr=to_inr(emergency_fund)))
-    with r2c2: st.html(kpi_card("Travel Fund",       f"KD {travel_fund:,.3f}",    "#8b5cf6", "Vacation savings", inr=to_inr(travel_fund)))
-    with r2c3: st.html(kpi_card("Available Balance", f"KD {available:,.3f}",      bal_color, bal_note,           inr=to_inr(available)))
+    # ── Row 2 KPIs: Emergency | Travel | Investments | Total Savings ──
+    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+    with r2c1: st.html(kpi_card("Emergency Fund",    f"KD {emergency_fund:,.3f}",   "#3b82f6", "In-hand savings",  inr=to_inr(emergency_fund)))
+    with r2c2: st.html(kpi_card("Travel Fund",       f"KD {travel_fund:,.3f}",      "#8b5cf6", "Vacation savings", inr=to_inr(travel_fund)))
+    with r2c3: st.html(kpi_card("Total Investments", f"KD {investment_total:,.3f}", "#0d9488", "Invested savings", inr=to_inr(investment_total)))
+    with r2c4: st.html(kpi_card("Total Savings",     f"KD {net_savings:,.3f}",      "#06b6d4", "All pots combined", inr=to_inr(net_savings)))
+
+    st.markdown("<div style='margin-top:0.8rem'></div>", unsafe_allow_html=True)
+
+    # ── Row 3 KPIs: Available Balance | Outstanding Debt ──
+    r3c1, r3c2 = st.columns(2)
+    bal_color  = "#10b981" if available >= 0 else "#ef4444"
+    bal_note   = "Freely available" if available >= 0 else "Overspent"
+    debt_note  = "Debt Free!" if outstanding_debt <= 0 else f"KD {outstanding_debt:,.3f} remaining"
+    debt_inr   = to_inr(max(outstanding_debt, 0))
+    with r3c1: st.html(kpi_card("Available Balance", f"KD {available:,.3f}",         bal_color, bal_note, inr=to_inr(available)))
+    with r3c2: st.html(kpi_card("Outstanding Debt",  f"KD {max(outstanding_debt,0):,.3f}", "#ef4444", debt_note, inr=debt_inr))
 
     # ── Charts ──
     st.subheader("Charts")
@@ -401,15 +465,18 @@ else:
                        labels={"amount": "Amount (KD)", "date": "Date"},
                        color_discrete_map=COLOR_MAP)
     fig_line.update_layout(**CHART_LAYOUT)
+    fig_line.update_xaxes(tickformat="%b %d")
     st.plotly_chart(fig_line, use_container_width=True)
 
     # ── Monthly Comparison ──────────────────────────────────────────────────
     st.subheader("Monthly Comparison")
 
     # Convert date column to datetime, extract year-month as string e.g. "2025-03"
-    df["month"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m")
+    df["month_sort"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m")
+    df["month"]      = pd.to_datetime(df["date"]).dt.strftime("%b %Y")
 
-    monthly = df.groupby(["month", "type"])["amount"].sum().reset_index()
+    monthly = df.groupby(["month_sort", "month", "type"])["amount"].sum().reset_index()
+    monthly = monthly.sort_values("month_sort")
     fig_monthly = px.bar(monthly, x="month", y="amount", color="type", barmode="group",
                          title="Monthly Income vs Expense vs Saving vs Credit",
                          labels={"amount": "Amount (KD)", "month": "Month"},
@@ -419,15 +486,14 @@ else:
 
     # Monthly summary table
     monthly_pivot = df.pivot_table(
-        index="month", columns="type", values="amount", aggfunc="sum", fill_value=0
-    ).reset_index()
+        index="month_sort", columns="type", values="amount", aggfunc="sum", fill_value=0
+    ).reset_index().rename(columns={"month_sort": "month"})
     # Add a net column if key columns exist
-    for col in ["Income", "Expense", "Credit", "Saving"]:
+    for col in ["Income", "Expense", "Credit", "Saving", "Withdrawal", "Debit"]:
         if col not in monthly_pivot.columns:
             monthly_pivot[col] = 0.0
-    monthly_pivot["Net (Income−Expense−Credit−Saving)"] = (
-        monthly_pivot["Income"] - monthly_pivot["Expense"]
-        - monthly_pivot["Credit"] - monthly_pivot["Saving"]
+    monthly_pivot["Net (Income−Expense−Credit)"] = (
+        monthly_pivot["Income"] - monthly_pivot["Expense"] - monthly_pivot["Credit"]
     )
     st.dataframe(monthly_pivot.round(3), use_container_width=True, hide_index=True)
 
@@ -438,7 +504,7 @@ else:
     with fc1:
         filter_person   = st.selectbox("Filter by Person",   ["All", "Neena", "Shobin"])
     with fc2:
-        filter_type     = st.selectbox("Filter by Type",     ["All", "Income", "Expense", "Credit", "Saving"])
+        filter_type     = st.selectbox("Filter by Type",     ["All", "Income", "Expense", "Credit", "Saving", "Withdrawal", "Debit"])
     with fc3:
         all_categories  = ["All"] + sorted(df["category"].unique().tolist())
         filter_category = st.selectbox("Filter by Category", all_categories)
@@ -480,8 +546,44 @@ else:
     if not filtered_df.empty:
         with st.expander("Show table with ID numbers (use ID to delete)"):
             st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-        delete_id = st.number_input("Enter ID to delete", min_value=1, step=1)
-        if st.button("Delete Entry", type="secondary"):
-            delete_transaction(int(delete_id))
-            st.success(f"Entry #{delete_id} deleted.")
-            st.rerun()
+
+        # ── Option 1: Delete a single row by ID ──────────────────────────
+        st.markdown("**Option 1 — Delete single row by ID**")
+        del1, del2 = st.columns([3, 1])
+        with del1:
+            delete_id = st.number_input("Enter ID", min_value=1, step=1, key="del_single_id")
+        with del2:
+            st.markdown("<div style='margin-top:1.85rem'></div>", unsafe_allow_html=True)
+            if st.button("Delete Row", type="secondary", key="del_single_btn"):
+                delete_transaction(int(delete_id))
+                st.success(f"Entry #{delete_id} deleted.")
+                st.rerun()
+
+        st.markdown("---")
+
+        # ── Option 2: Delete multiple specific rows ───────────────────────
+        st.markdown("**Option 2 — Delete specific rows (pick multiple)**")
+        id_options = [
+            f"ID {row['id']} | {row['person']} | {row['type']} | {row['category']} | KD {row['amount']:.3f}"
+            for _, row in filtered_df.iterrows()
+        ]
+        selected_labels = st.multiselect("Select rows to delete", id_options, key="del_multi_select")
+        if selected_labels:
+            selected_ids = [int(lbl.split(" | ")[0].replace("ID ", "")) for lbl in selected_labels]
+            if st.button(f"Delete {len(selected_ids)} Selected Row(s)", type="secondary", key="del_multi_btn"):
+                delete_multiple_transactions(selected_ids)
+                st.success(f"{len(selected_ids)} row(s) deleted.")
+                st.rerun()
+
+        st.markdown("---")
+
+        # ── Option 3: Delete ALL filtered rows ───────────────────────────
+        st.markdown("**Option 3 — Delete ALL filtered rows**")
+        n = len(filtered_df)
+        confirm_all = st.checkbox(f"Confirm — I want to delete all {n} filtered row(s)", key="del_all_confirm")
+        if confirm_all:
+            if st.button(f"Delete All {n} Filtered Row(s)", type="secondary", key="del_all_btn"):
+                ids = filtered_df["id"].tolist()
+                delete_multiple_transactions([int(i) for i in ids])
+                st.success(f"{n} row(s) deleted.")
+                st.rerun()

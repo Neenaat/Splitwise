@@ -115,3 +115,24 @@ def delete_transaction(transaction_id):
         conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
         conn.commit()
     conn.close()
+
+# ─── DELETE MULTIPLE TRANSACTIONS ─────────────────────────────────────────────
+def delete_multiple_transactions(ids: list):
+    if not ids:
+        return
+    conn = get_connection()
+    if USE_POSTGRES:
+        cur = conn.cursor()
+        cur.execute(
+            f"DELETE FROM transactions WHERE id IN ({','.join(['%s'] * len(ids))})",
+            ids
+        )
+        conn.commit()
+        cur.close()
+    else:
+        conn.execute(
+            f"DELETE FROM transactions WHERE id IN ({','.join(['?'] * len(ids))})",
+            ids
+        )
+        conn.commit()
+    conn.close()

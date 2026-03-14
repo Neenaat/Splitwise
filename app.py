@@ -450,20 +450,29 @@ else:
         else:
             st.info("No savings data yet.")
 
-    # Bar chart: per person — Net Saving replaces raw Saving/Withdrawal so bar matches KPI
-    raw_sum     = df.groupby(["person", "type"])["amount"].sum().reset_index()
-    non_sav_sum = raw_sum[~raw_sum["type"].isin(["Saving", "Withdrawal"])].copy()
+    # Bar chart: per person — Net Saving and Net Debt replace raw types to match KPI cards
+    raw_sum          = df.groupby(["person", "type"])["amount"].sum().reset_index()
+    non_sav_debt_sum = raw_sum[~raw_sum["type"].isin(["Saving", "Withdrawal", "Debit"])].copy()
     sav_by_p    = raw_sum[raw_sum["type"] == "Saving"].set_index("person")["amount"]
     wdr_by_p    = raw_sum[raw_sum["type"] == "Withdrawal"].set_index("person")["amount"]
+    dbt_by_p    = raw_sum[raw_sum["type"] == "Debit"].set_index("person")["amount"]
+    loan_by_p   = df[(df["type"] == "Expense") & (df["category"] == "Loan Repayment")].groupby("person")["amount"].sum()
+    cc_by_p     = df[(df["type"] == "Expense") & (df["category"] == "Credit Card Bill")].groupby("person")["amount"].sum()
+    persons = df["person"].unique()
     net_sav_rows = [
         {"person": p, "type": "Net Saving",
          "amount": max(sav_by_p.get(p, 0) - wdr_by_p.get(p, 0), 0)}
-        for p in df["person"].unique()
+        for p in persons
     ]
-    summary = pd.concat([non_sav_sum, pd.DataFrame(net_sav_rows)], ignore_index=True)
-    bar_color_map = {**COLOR_MAP, "Net Saving": "#3b82f6"}
+    net_dbt_rows = [
+        {"person": p, "type": "Net Debt",
+         "amount": max(dbt_by_p.get(p, 0) - loan_by_p.get(p, 0) - cc_by_p.get(p, 0), 0)}
+        for p in persons
+    ]
+    summary = pd.concat([non_sav_debt_sum, pd.DataFrame(net_sav_rows), pd.DataFrame(net_dbt_rows)], ignore_index=True)
+    bar_color_map = {**COLOR_MAP, "Net Saving": "#3b82f6", "Net Debt": "#dc2626"}
     fig_bar = px.bar(summary, x="person", y="amount", color="type", barmode="group",
-                     title="Income vs Expense vs Credit vs Net Saving by Person",
+                     title="Income vs Expense vs Credit vs Net Saving vs Net Debt by Person",
                      labels={"amount": "Amount (KD)", "person": "Person"},
                      color_discrete_map=bar_color_map)
     fig_bar.update_layout(**CHART_LAYOUT)
@@ -487,11 +496,17 @@ else:
     df["month_sort"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m")
     df["month"]      = pd.to_datetime(df["date"]).dt.strftime("%b %Y")
 
-    # Monthly chart — Net Saving per month (Saving minus Withdrawal), matching KPI logic
-    monthly_raw     = df.groupby(["month_sort", "month", "type"])["amount"].sum().reset_index()
-    monthly_non_sav = monthly_raw[~monthly_raw["type"].isin(["Saving", "Withdrawal"])].copy()
-    sav_m = monthly_raw[monthly_raw["type"] == "Saving"].set_index(["month_sort", "month"])["amount"]
-    wdr_m = monthly_raw[monthly_raw["type"] == "Withdrawal"].set_index(["month_sort", "month"])["amount"]
+    # Monthly chart — Net Saving and Net Debt per month, matching KPI logic
+    monthly_raw          = df.groupby(["month_sort", "month", "type"])["amount"].sum().reset_index()
+    monthly_non_sav_debt = monthly_raw[~monthly_raw["type"].isin(["Saving", "Withdrawal", "Debit"])].copy()
+    sav_m  = monthly_raw[monthly_raw["type"] == "Saving"].set_index(["month_sort", "month"])["amount"]
+    wdr_m  = monthly_raw[monthly_raw["type"] == "Withdrawal"].set_index(["month_sort", "month"])["amount"]
+    dbt_m  = monthly_raw[monthly_raw["type"] == "Debit"].set_index(["month_sort", "month"])["amount"]
+    # Loan repayments and CC bill repayments per month (these are Expense entries)
+    repay_df = df[df["category"].isin(["Loan Repayment", "Credit Card Bill"])].copy()
+    repay_df["month_sort"] = pd.to_datetime(repay_df["date"]).dt.strftime("%Y-%m")
+    repay_df["month"]      = pd.to_datetime(repay_df["date"]).dt.strftime("%b %Y")
+    repay_m = repay_df.groupby(["month_sort", "month"])["amount"].sum()
     all_months = monthly_raw[["month_sort", "month"]].drop_duplicates()
     net_sav_m = [
         {"month_sort": r["month_sort"], "month": r["month"], "type": "Net Saving",
@@ -499,11 +514,17 @@ else:
                        - wdr_m.get((r["month_sort"], r["month"]), 0), 0)}
         for _, r in all_months.iterrows()
     ]
-    monthly = pd.concat([monthly_non_sav, pd.DataFrame(net_sav_m)], ignore_index=True)
+    net_dbt_m = [
+        {"month_sort": r["month_sort"], "month": r["month"], "type": "Net Debt",
+         "amount": max(dbt_m.get((r["month_sort"], r["month"]), 0)
+                       - repay_m.get((r["month_sort"], r["month"]), 0), 0)}
+        for _, r in all_months.iterrows()
+    ]
+    monthly = pd.concat([monthly_non_sav_debt, pd.DataFrame(net_sav_m), pd.DataFrame(net_dbt_m)], ignore_index=True)
     monthly = monthly.sort_values("month_sort")
-    monthly_color_map = {**COLOR_MAP, "Net Saving": "#3b82f6"}
+    monthly_color_map = {**COLOR_MAP, "Net Saving": "#3b82f6", "Net Debt": "#dc2626"}
     fig_monthly = px.bar(monthly, x="month", y="amount", color="type", barmode="group",
-                         title="Monthly Income vs Expense vs Net Saving vs Credit",
+                         title="Monthly Income vs Expense vs Net Saving vs Net Debt",
                          labels={"amount": "Amount (KD)", "month": "Month"},
                          color_discrete_map=monthly_color_map)
     fig_monthly.update_layout(**CHART_LAYOUT)

@@ -418,10 +418,13 @@ else:
         sel_months = [sel_month_radio]
 
     # ── Period totals — correctly filtered by month ───────────────────────────
-    total_income     = fdf[fdf["type"] == "Income"]["amount"].sum()
-    total_expense    = fdf[fdf["type"] == "Expense"]["amount"].sum()
-    total_credit     = fdf[fdf["type"] == "Credit"]["amount"].sum()
-    available        = total_income - total_expense - total_credit
+    total_income      = fdf[fdf["type"] == "Income"]["amount"].sum()
+    total_expense     = fdf[fdf["type"] == "Expense"]["amount"].sum()
+    total_credit      = fdf[fdf["type"] == "Credit"]["amount"].sum()
+    period_saving     = fdf[fdf["type"] == "Saving"]["amount"].sum()
+    period_withdrawal = fdf[fdf["type"] == "Withdrawal"]["amount"].sum()
+    # Savings reduce available balance — money set aside is no longer freely spendable
+    available         = total_income - total_expense - total_credit - period_saving + period_withdrawal
 
     # ── Cumulative balances — always from FULL dataset, never month-filtered ──
     # Debt and savings are running balances like a bank account. Filtering by

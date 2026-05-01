@@ -136,3 +136,67 @@ def delete_multiple_transactions(ids: list):
         )
         conn.commit()
     conn.close()
+
+# ─── CREATE BUDGET TABLE ──────────────────────────────────────────────────────
+def create_budget_table():
+    conn = get_connection()
+    if USE_POSTGRES:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS budgets (
+                id       SERIAL PRIMARY KEY,
+                month    TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount   REAL NOT NULL DEFAULT 0,
+                UNIQUE(month, category)
+            )
+        """)
+        conn.commit()
+        cur.close()
+    else:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS budgets (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                month    TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount   REAL NOT NULL DEFAULT 0,
+                UNIQUE(month, category)
+            )
+        """)
+        conn.commit()
+    conn.close()
+
+# ─── SET BUDGET (upsert) ──────────────────────────────────────────────────────
+def set_budget(month: str, category: str, amount: float):
+    conn = get_connection()
+    if USE_POSTGRES:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO budgets (month, category, amount)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (month, category) DO UPDATE SET amount = EXCLUDED.amount
+        """, (month, category, amount))
+        conn.commit()
+        cur.close()
+    else:
+        conn.execute("""
+            INSERT INTO budgets (month, category, amount)
+            VALUES (?, ?, ?)
+            ON CONFLICT (month, category) DO UPDATE SET amount = excluded.amount
+        """, (month, category, amount))
+        conn.commit()
+    conn.close()
+
+# ─── GET BUDGETS FOR A MONTH ──────────────────────────────────────────────────
+def get_budgets(month: str) -> dict:
+    conn = get_connection()
+    if USE_POSTGRES:
+        cur = conn.cursor()
+        cur.execute("SELECT category, amount FROM budgets WHERE month = %s", (month,))
+        rows = cur.fetchall()
+        cur.close()
+    else:
+        cur = conn.execute("SELECT category, amount FROM budgets WHERE month = ?", (month,))
+        rows = cur.fetchall()
+    conn.close()
+    return {row[0]: row[1] for row in rows}

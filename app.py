@@ -12,11 +12,14 @@ import plotly.express as px
 import pandas as pd
 import requests
 from yaml.loader import SafeLoader
-from datetime import date
-from database import create_table, add_transaction, get_all_transactions, delete_transaction, delete_multiple_transactions
+from datetime import date, datetime
+from database import (create_table, create_budget_table, add_transaction, get_all_transactions,
+                      delete_transaction, delete_multiple_transactions,
+                      set_budget, get_budgets)
 
 # ─── APP SETUP ───────────────────────────────────────────────────────────────
 create_table()
+create_budget_table()
 
 st.set_page_config(page_title="SPLIT_WISE", page_icon="💜", layout="wide")
 
@@ -206,6 +209,12 @@ elif authentication_status is None:
 authenticator.logout("Logout", location="sidebar")
 st.sidebar.markdown("---")
 
+# ─── LOAD DATA (early — needed for sidebar month filter) ─────────────────────
+df = get_all_transactions()
+if not df.empty:
+    df["month_sort"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m")
+    df["month"]      = pd.to_datetime(df["date"]).dt.strftime("%b %Y")
+
 # ─── CATEGORIES ──────────────────────────────────────────────────────────────
 EXPENSE_CATEGORIES  = ["Grocery", "Rent", "Send to India", "Transport",
                         "Medical", "Shopping", "Entertainment",
@@ -256,6 +265,18 @@ st.html("""
 st.sidebar.markdown("### ✦ ADD NEW ENTRY")
 
 person     = st.sidebar.selectbox("Who are you?", ["Neena", "Shobin"])
+
+# ── Month filter ──────────────────────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ☰ FILTER DASHBOARD")
+if not df.empty and "month_sort" in df.columns:
+    _month_opts = ["All"] + [datetime.strptime(m, "%Y-%m").strftime("%b %Y")
+                              for m in sorted(df["month_sort"].unique().tolist(), reverse=True)]
+else:
+    _month_opts = ["All"]
+sel_month_radio = st.sidebar.radio("Select Month", _month_opts, key="global_month_filter")
+st.sidebar.markdown("---")
+
 entry_type = st.sidebar.radio("Type", ["Income", "Expense", "Credit", "Saving", "Withdrawal", "Debit"])
 
 if entry_type == "Income":
@@ -300,9 +321,6 @@ if st.sidebar.button("Add Entry", type="primary"):
         st.sidebar.success(f"{entry_type} of KD {amount:.3f} saved!")
         st.rerun()
 
-# ─── LOAD DATA ────────────────────────────────────────────────────────────────
-df = get_all_transactions()
-
 # ─── KPI HELPER ──────────────────────────────────────────────────────────────
 def kpi_card(label, value, accent, note="", inr=None):
     """
@@ -325,6 +343,46 @@ def kpi_card(label, value, accent, note="", inr=None):
         {inr_html}
     </div>"""
 
+# ─── BUDGET KPI CARD ─────────────────────────────────────────────────────────
+def budget_kpi_card(label, budget, actual, is_expense=True):
+    """
+    Shows budget vs actual with colour-coded status.
+    is_expense=True  → green when actual < budget (under budget is good)
+    is_expense=False → green when actual >= budget (hitting target is good)
+    """
+    if budget == 0:
+        border    = "#374151"
+        status_html = '<p style="color:#64748b;font-size:0.78rem;margin:0.3rem 0 0 0;">No budget set</p>'
+        pct_str   = ""
+    else:
+        pct = actual / budget * 100
+        if is_expense:
+            good    = actual <= budget
+            diff_kd = budget - actual
+            sign    = "✓" if good else "⚠"
+            label_d = "under budget" if good else "over budget"
+        else:
+            good    = actual >= budget
+            diff_kd = actual - budget
+            sign    = "✓" if good else "⚠"
+            label_d = "above target" if good else "below target"
+        border      = "#10b981" if good else "#ef4444"
+        clr         = "#10b981" if good else "#ef4444"
+        pct_clr     = "#10b981" if good else "#ef4444"
+        pct_str     = f'<span style="color:{pct_clr};margin-left:0.4rem;">({pct:.0f}%)</span>'
+        status_html = (f'<p style="color:{clr};font-size:0.78rem;margin:0.3rem 0 0 0;">'
+                       f'{sign} KD {abs(diff_kd):,.3f} {label_d}</p>')
+    return f"""
+    <div style="background:#1e2330;border-top:4px solid {border};border-radius:10px;
+                padding:1.2rem 1.4rem;height:100%;">
+        <p style="color:#94a3b8;font-size:0.78rem;font-weight:600;
+                  text-transform:uppercase;letter-spacing:1px;margin:0 0 0.4rem 0;">{label}</p>
+        <p style="color:#ffffff;font-size:1.4rem;font-weight:800;margin:0;">KD {actual:,.3f}</p>
+        <p style="color:#64748b;font-size:0.76rem;margin:0.2rem 0 0 0;">
+            Budget: KD {budget:,.3f}{pct_str}</p>
+        {status_html}
+    </div>"""
+
 # ─── CHART LAYOUT (dark theme) ───────────────────────────────────────────────
 CHART_LAYOUT = dict(
     paper_bgcolor="#161b22", plot_bgcolor="#161b22",
@@ -338,44 +396,49 @@ CHART_LAYOUT = dict(
 )
 
 COLOR_MAP = {
-    "Income":     "#10b981",  # Green
-    "Expense":    "#ef4444",  # Red
-    "Credit":     "#f59e0b",  # Orange
+    "Income":     "#10b981",  # Emerald green
+    "Expense":    "#f97316",  # Orange
+    "Credit":     "#eab308",  # Yellow
     "Saving":     "#3b82f6",  # Blue
-    "Withdrawal": "#f43f5e",  # Rose (money leaving savings)
-    "Debit":      "#dc2626",  # Dark Red
+    "Withdrawal": "#ec4899",  # Pink
+    "Debit":      "#7c3aed",  # Purple
 }
 
 # ─── MAIN DASHBOARD ──────────────────────────────────────────────────────────
 if df.empty:
     st.info("No entries yet. Add your first entry from the left sidebar!")
 else:
-    # ── Totals ──
-    total_income       = df[df["type"] == "Income"]["amount"].sum()
-    total_expense      = df[df["type"] == "Expense"]["amount"].sum()
-    total_credit       = df[df["type"] == "Credit"]["amount"].sum()
-    total_saving       = df[df["type"] == "Saving"]["amount"].sum()
-    total_withdrawal   = df[df["type"] == "Withdrawal"]["amount"].sum()
+    # ── Apply month filter from sidebar radio ─────────────────────────────────
+    if sel_month_radio == "All":
+        fdf = df.copy()
+        sel_months = []
+    else:
+        _ms = datetime.strptime(sel_month_radio, "%b %Y").strftime("%Y-%m")
+        fdf = df[df["month_sort"] == _ms].copy()
+        sel_months = [sel_month_radio]
 
-    def _pot(category_name):
-        """Net balance of a savings pot = saved into it - withdrawn from it."""
-        saved    = df[(df["type"] == "Saving")     & (df["category"] == category_name)]["amount"].sum()
-        taken    = df[(df["type"] == "Withdrawal") & (df["category"] == category_name)]["amount"].sum()
+    # ── Period totals — correctly filtered by month ───────────────────────────
+    total_income     = fdf[fdf["type"] == "Income"]["amount"].sum()
+    total_expense    = fdf[fdf["type"] == "Expense"]["amount"].sum()
+    total_credit     = fdf[fdf["type"] == "Credit"]["amount"].sum()
+    available        = total_income - total_expense - total_credit
+
+    # ── Cumulative balances — always from FULL dataset, never month-filtered ──
+    # Debt and savings are running balances like a bank account. Filtering by
+    # month makes them wrong: debt from January disappears in a March filter.
+    def _pot_all(category_name):
+        saved = df[(df["type"] == "Saving")     & (df["category"] == category_name)]["amount"].sum()
+        taken = df[(df["type"] == "Withdrawal") & (df["category"] == category_name)]["amount"].sum()
         return max(saved - taken, 0)
 
-    emergency_fund     = _pot("Emergency Fund")
-    travel_fund        = _pot("Travel Fund")
-    investment_total   = _pot("Investments")
-    # Total net savings = all savings pots combined minus all withdrawals
-    net_savings        = max(total_saving - total_withdrawal, 0)
-
-    # Debit = money borrowed; reduced by Loan Repayment and Credit Card Bill expense entries
-    total_debit        = df[df["type"] == "Debit"]["amount"].sum()
-    loan_repaid        = df[(df["type"] == "Expense") & (df["category"] == "Loan Repayment")]["amount"].sum()
-    cc_repaid          = df[(df["type"] == "Expense") & (df["category"] == "Credit Card Bill")]["amount"].sum()
-    outstanding_debt   = total_debit - loan_repaid - cc_repaid
-    # Available balance = income minus what was spent and given out (savings stay with you)
-    available          = total_income - total_expense - total_credit
+    emergency_fund   = _pot_all("Emergency Fund")
+    travel_fund      = _pot_all("Travel Fund")
+    investment_total = _pot_all("Investments")
+    net_savings      = max(df[df["type"] == "Saving"]["amount"].sum()
+                           - df[df["type"] == "Withdrawal"]["amount"].sum(), 0)
+    outstanding_debt = (df[df["type"] == "Debit"]["amount"].sum()
+                        - df[(df["type"] == "Expense") & (df["category"] == "Loan Repayment")]["amount"].sum()
+                        - df[(df["type"] == "Expense") & (df["category"] == "Credit Card Bill")]["amount"].sum())
 
     # ── Fetch live rates once — used across all KPI cards ──
     rates   = get_exchange_rates()
@@ -424,13 +487,13 @@ else:
 
     # Expense pie — warm red/orange palette
     with ch1:
-        exp_df = df[df["type"] == "Expense"]
+        exp_df = fdf[fdf["type"] == "Expense"]
         if not exp_df.empty:
             fig_exp_pie = px.pie(exp_df, names="category", values="amount",
                                  title="Expenses by Category", hole=0.35,
-                                 color_discrete_sequence=["#ef4444","#f97316","#eab308",
-                                                          "#ec4899","#f43f5e","#fb923c",
-                                                          "#fbbf24","#a855f7"])
+                                 color_discrete_sequence=["#f97316","#ef4444","#eab308",
+                                                          "#a855f7","#ec4899","#14b8a6",
+                                                          "#fb923c","#6366f1"])
             fig_exp_pie.update_layout(**CHART_LAYOUT)
             st.plotly_chart(fig_exp_pie, use_container_width=True)
         else:
@@ -438,7 +501,7 @@ else:
 
     # Savings pie — net per pot (Saving minus Withdrawals), matching KPI cards
     with ch2:
-        pot_rows = [{"category": cat, "amount": _pot(cat)} for cat in SAVING_CATEGORIES]
+        pot_rows = [{"category": cat, "amount": _pot_all(cat)} for cat in SAVING_CATEGORIES]
         sav_net_df = pd.DataFrame(pot_rows)
         sav_net_df = sav_net_df[sav_net_df["amount"] > 0]
         if not sav_net_df.empty:
@@ -450,37 +513,9 @@ else:
         else:
             st.info("No savings data yet.")
 
-    # Bar chart: per person — Net Saving and Net Debt replace raw types to match KPI cards
-    raw_sum          = df.groupby(["person", "type"])["amount"].sum().reset_index()
-    non_sav_debt_sum = raw_sum[~raw_sum["type"].isin(["Saving", "Withdrawal", "Debit"])].copy()
-    sav_by_p    = raw_sum[raw_sum["type"] == "Saving"].set_index("person")["amount"]
-    wdr_by_p    = raw_sum[raw_sum["type"] == "Withdrawal"].set_index("person")["amount"]
-    dbt_by_p    = raw_sum[raw_sum["type"] == "Debit"].set_index("person")["amount"]
-    loan_by_p   = df[(df["type"] == "Expense") & (df["category"] == "Loan Repayment")].groupby("person")["amount"].sum()
-    cc_by_p     = df[(df["type"] == "Expense") & (df["category"] == "Credit Card Bill")].groupby("person")["amount"].sum()
-    persons = df["person"].unique()
-    net_sav_rows = [
-        {"person": p, "type": "Net Saving",
-         "amount": max(sav_by_p.get(p, 0) - wdr_by_p.get(p, 0), 0)}
-        for p in persons
-    ]
-    net_dbt_rows = [
-        {"person": p, "type": "Net Debt",
-         "amount": max(dbt_by_p.get(p, 0) - loan_by_p.get(p, 0) - cc_by_p.get(p, 0), 0)}
-        for p in persons
-    ]
-    summary = pd.concat([non_sav_debt_sum, pd.DataFrame(net_sav_rows), pd.DataFrame(net_dbt_rows)], ignore_index=True)
-    bar_color_map = {**COLOR_MAP, "Net Saving": "#3b82f6", "Net Debt": "#dc2626"}
-    fig_bar = px.bar(summary, x="person", y="amount", color="type", barmode="group",
-                     title="Income vs Expense vs Credit vs Net Saving vs Net Debt by Person",
-                     labels={"amount": "Amount (KD)", "person": "Person"},
-                     color_discrete_map=bar_color_map)
-    fig_bar.update_layout(**CHART_LAYOUT)
-    st.plotly_chart(fig_bar, use_container_width=True)
-
     # Line chart: over time
     st.subheader("Spending Over Time")
-    daily = df.groupby(["date", "type"])["amount"].sum().reset_index()
+    daily = fdf.groupby(["date", "type"])["amount"].sum().reset_index()
     fig_line = px.line(daily, x="date", y="amount", color="type", markers=True,
                        title="Daily Income, Expenses, Savings & Credits",
                        labels={"amount": "Amount (KD)", "date": "Date"},
@@ -492,21 +527,12 @@ else:
     # ── Monthly Comparison ──────────────────────────────────────────────────
     st.subheader("Monthly Comparison")
 
-    # Convert date column to datetime, extract year-month as string e.g. "2025-03"
-    df["month_sort"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m")
-    df["month"]      = pd.to_datetime(df["date"]).dt.strftime("%b %Y")
-
-    # Monthly chart — Net Saving and Net Debt per month, matching KPI logic
-    monthly_raw          = df.groupby(["month_sort", "month", "type"])["amount"].sum().reset_index()
+    monthly_raw          = fdf.groupby(["month_sort", "month", "type"])["amount"].sum().reset_index()
     monthly_non_sav_debt = monthly_raw[~monthly_raw["type"].isin(["Saving", "Withdrawal", "Debit"])].copy()
     sav_m  = monthly_raw[monthly_raw["type"] == "Saving"].set_index(["month_sort", "month"])["amount"]
     wdr_m  = monthly_raw[monthly_raw["type"] == "Withdrawal"].set_index(["month_sort", "month"])["amount"]
     dbt_m  = monthly_raw[monthly_raw["type"] == "Debit"].set_index(["month_sort", "month"])["amount"]
-    # Loan repayments and CC bill repayments per month (these are Expense entries)
-    repay_df = df[df["category"].isin(["Loan Repayment", "Credit Card Bill"])].copy()
-    repay_df["month_sort"] = pd.to_datetime(repay_df["date"]).dt.strftime("%Y-%m")
-    repay_df["month"]      = pd.to_datetime(repay_df["date"]).dt.strftime("%b %Y")
-    repay_m = repay_df.groupby(["month_sort", "month"])["amount"].sum()
+    repay_m = fdf[fdf["category"].isin(["Loan Repayment", "Credit Card Bill"])].groupby(["month_sort", "month"])["amount"].sum()
     all_months = monthly_raw[["month_sort", "month"]].drop_duplicates()
     net_sav_m = [
         {"month_sort": r["month_sort"], "month": r["month"], "type": "Net Saving",
@@ -531,10 +557,9 @@ else:
     st.plotly_chart(fig_monthly, use_container_width=True)
 
     # Monthly summary table
-    monthly_pivot = df.pivot_table(
+    monthly_pivot = fdf.pivot_table(
         index="month_sort", columns="type", values="amount", aggfunc="sum", fill_value=0
     ).reset_index().rename(columns={"month_sort": "month"})
-    # Add a net column if key columns exist
     for col in ["Income", "Expense", "Credit", "Saving", "Withdrawal", "Debit"]:
         if col not in monthly_pivot.columns:
             monthly_pivot[col] = 0.0
@@ -547,48 +572,49 @@ else:
     st.dataframe(monthly_pivot.round(3), use_container_width=True, hide_index=True)
 
     # ── Transactions Table + Filter + Export ────────────────────────────────
-    st.subheader("All Transactions")
+    with st.expander(f"All Transactions ({len(fdf)} rows — click to expand)", expanded=False):
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            filter_person   = st.selectbox("Filter by Person",   ["All", "Neena", "Shobin"])
+        with fc2:
+            filter_type     = st.selectbox("Filter by Type",     ["All", "Income", "Expense", "Credit", "Saving", "Withdrawal", "Debit"])
+        with fc3:
+            all_categories  = ["All"] + sorted(fdf["category"].unique().tolist())
+            filter_category = st.selectbox("Filter by Category", all_categories)
 
-    fc1, fc2, fc3 = st.columns(3)
-    with fc1:
-        filter_person   = st.selectbox("Filter by Person",   ["All", "Neena", "Shobin"])
-    with fc2:
-        filter_type     = st.selectbox("Filter by Type",     ["All", "Income", "Expense", "Credit", "Saving", "Withdrawal", "Debit"])
-    with fc3:
-        all_categories  = ["All"] + sorted(df["category"].unique().tolist())
-        filter_category = st.selectbox("Filter by Category", all_categories)
+        filtered_df = fdf.copy()
+        if filter_person   != "All": filtered_df = filtered_df[filtered_df["person"]   == filter_person]
+        if filter_type     != "All": filtered_df = filtered_df[filtered_df["type"]     == filter_type]
+        if filter_category != "All": filtered_df = filtered_df[filtered_df["category"] == filter_category]
 
-    filtered_df = df.copy()
-    if filter_person   != "All": filtered_df = filtered_df[filtered_df["person"]   == filter_person]
-    if filter_type     != "All": filtered_df = filtered_df[filtered_df["type"]     == filter_type]
-    if filter_category != "All": filtered_df = filtered_df[filtered_df["category"] == filter_category]
-
-    st.dataframe(
-        filtered_df[["date", "person", "type", "category", "amount", "note"]],
-        use_container_width=True, hide_index=True
-    )
-
-    # ── Excel Export ────────────────────────────────────────────────────────
-    # Create the Excel file in memory (no temp file needed)
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-        filtered_df[["date", "person", "type", "category", "amount", "note"]].to_excel(
-            writer, index=False, sheet_name="Transactions"
+        st.dataframe(
+            filtered_df[["date", "person", "type", "category", "amount", "note"]],
+            use_container_width=True, hide_index=True
         )
 
-    # Build a descriptive filename based on active filters
-    fname_parts = []
-    if filter_category != "All": fname_parts.append(filter_category.replace(" ", "_"))
-    if filter_type     != "All": fname_parts.append(filter_type)
-    if filter_person   != "All": fname_parts.append(filter_person)
-    filename = ("_".join(fname_parts) if fname_parts else "All_Transactions") + ".xlsx"
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            filtered_df[["date", "person", "type", "category", "amount", "note"]].to_excel(
+                writer, index=False, sheet_name="Transactions"
+            )
+        fname_parts = []
+        if filter_category != "All": fname_parts.append(filter_category.replace(" ", "_"))
+        if filter_type     != "All": fname_parts.append(filter_type)
+        if filter_person   != "All": fname_parts.append(filter_person)
+        filename = ("_".join(fname_parts) if fname_parts else "All_Transactions") + ".xlsx"
+        st.download_button(
+            label=f"Download as Excel  ({len(filtered_df)} rows)",
+            data=excel_buffer.getvalue(),
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-    st.download_button(
-        label=f"Download as Excel  ({len(filtered_df)} rows)",
-        data=excel_buffer.getvalue(),
-        file_name=filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    # filtered_df needed for delete section — default to full fdf if expander not opened
+    try:
+        filtered_df
+    except NameError:
+        filtered_df = fdf.copy()
+        filter_person = filter_type = filter_category = "All"
 
     # ── Delete Entry ────────────────────────────────────────────────────────
     st.subheader("Delete an Entry")
@@ -636,3 +662,107 @@ else:
                 delete_multiple_transactions([int(i) for i in ids])
                 st.success(f"{n} row(s) deleted.")
                 st.rerun()
+
+    # ── MONTHLY BUDGET ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Monthly Budget")
+
+    BUDGET_CATS = ["Income", "Grocery", "Send to India", "Medical",
+                   "Shopping", "Entertainment", "Other Expense", "Savings"]
+
+    # Build month list: all months that have data + current month
+    all_data_months = sorted(df["month_sort"].unique().tolist(), reverse=True) if not df.empty else []
+    current_month_str = datetime.today().strftime("%Y-%m")
+    if current_month_str not in all_data_months:
+        all_data_months.insert(0, current_month_str)
+
+    # Auto-link to global filter when exactly 1 month is selected
+    if len(sel_months) == 1:
+        selected_bm = datetime.strptime(sel_months[0], "%b %Y").strftime("%Y-%m")
+        st.caption(f"Budget month auto-set to **{sel_months[0]}** from the sidebar filter.")
+    else:
+        bm_col, _ = st.columns([2, 4])
+        with bm_col:
+            selected_bm = st.selectbox(
+                "Select Month",
+                all_data_months,
+                format_func=lambda m: datetime.strptime(m, "%Y-%m").strftime("%b %Y"),
+                key="budget_month_sel"
+            )
+
+    sel_month_label = datetime.strptime(selected_bm, "%Y-%m").strftime("%b %Y")
+    existing = get_budgets(selected_bm)
+
+    # ── Budget input form ──
+    with st.expander(f"Set / Edit Budget for {sel_month_label}", expanded=not bool(existing)):
+        with st.form("budget_form_main"):
+            st.markdown(f"**Monthly budget targets for {sel_month_label} (KD)**")
+            bc1, bc2 = st.columns(2)
+            budget_inputs = {}
+            for i, cat in enumerate(BUDGET_CATS):
+                with (bc1 if i % 2 == 0 else bc2):
+                    budget_inputs[cat] = st.number_input(
+                        cat,
+                        min_value=0.0,
+                        value=float(existing.get(cat, 0.0)),
+                        step=10.0,
+                        format="%.3f",
+                        key=f"bgt_{cat}"
+                    )
+            if st.form_submit_button("Save Budget", type="primary"):
+                for cat, amt in budget_inputs.items():
+                    set_budget(selected_bm, cat, amt)
+                st.success(f"Budget for {sel_month_label} saved!")
+                st.rerun()
+
+    # ── Actuals for selected budget month (always from full dataset, not global filter) ──
+    mdf = df[df["month_sort"] == selected_bm] if (not df.empty and "month_sort" in df.columns) else pd.DataFrame()
+
+    def actual_for(cat):
+        if mdf.empty:
+            return 0.0
+        if cat == "Income":
+            return float(mdf[mdf["type"] == "Income"]["amount"].sum())
+        if cat == "Savings":
+            s = mdf[mdf["type"] == "Saving"]["amount"].sum()
+            w = mdf[mdf["type"] == "Withdrawal"]["amount"].sum()
+            return float(max(s - w, 0))
+        if cat == "Other Expense":
+            return float(mdf[(mdf["type"] == "Expense") & (mdf["category"] == "Other")]["amount"].sum())
+        return float(mdf[(mdf["type"] == "Expense") & (mdf["category"] == cat)]["amount"].sum())
+
+    # ── Budget KPI cards ──
+    st.markdown(f"#### Budget vs Actual — {sel_month_label}")
+
+    bk1, bk2, bk3, bk4 = st.columns(4)
+    with bk1: st.html(budget_kpi_card("Income",        existing.get("Income", 0),        actual_for("Income"),        is_expense=False))
+    with bk2: st.html(budget_kpi_card("Grocery",       existing.get("Grocery", 0),       actual_for("Grocery"),       is_expense=True))
+    with bk3: st.html(budget_kpi_card("Send to India", existing.get("Send to India", 0), actual_for("Send to India"), is_expense=True))
+    with bk4: st.html(budget_kpi_card("Medical",       existing.get("Medical", 0),       actual_for("Medical"),       is_expense=True))
+
+    st.markdown("<div style='margin-top:0.8rem'></div>", unsafe_allow_html=True)
+
+    bk5, bk6, bk7, bk8 = st.columns(4)
+    with bk5: st.html(budget_kpi_card("Shopping",      existing.get("Shopping", 0),      actual_for("Shopping"),      is_expense=True))
+    with bk6: st.html(budget_kpi_card("Entertainment", existing.get("Entertainment", 0), actual_for("Entertainment"), is_expense=True))
+    with bk7: st.html(budget_kpi_card("Other Expense", existing.get("Other Expense", 0), actual_for("Other Expense"), is_expense=True))
+    with bk8: st.html(budget_kpi_card("Savings",       existing.get("Savings", 0),       actual_for("Savings"),       is_expense=False))
+
+    # ── Budget vs Actual bar chart ──
+    st.markdown("<div style='margin-top:1rem'></div>", unsafe_allow_html=True)
+    chart_rows = []
+    for cat in BUDGET_CATS:
+        chart_rows.append({"Category": cat, "Amount": existing.get(cat, 0.0), "Series": "Budget"})
+        chart_rows.append({"Category": cat, "Amount": actual_for(cat),        "Series": "Actual"})
+    bdf = pd.DataFrame(chart_rows)
+    if bdf["Amount"].sum() > 0:
+        fig_budget = px.bar(
+            bdf, x="Category", y="Amount", color="Series", barmode="group",
+            title=f"Budget vs Actual — {sel_month_label}",
+            labels={"Amount": "Amount (KD)"},
+            color_discrete_map={"Budget": "#374151", "Actual": "#7c3aed"}
+        )
+        fig_budget.update_layout(**CHART_LAYOUT)
+        st.plotly_chart(fig_budget, use_container_width=True)
+    else:
+        st.info("Set a budget above to see the Budget vs Actual chart.")
